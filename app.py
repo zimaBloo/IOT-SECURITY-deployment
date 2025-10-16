@@ -117,7 +117,7 @@ with tab_overview:
     c1, c2 = st.columns([2,1])
     with c1:
         st.subheader("Dataset preview")
-        st.dataframe(df.head(12), use_container_width=True)
+        st.dataframe(df.head(12), width="stretch")
     with c2:
         st.subheader("Shape")
         st.write(df.shape)
@@ -159,7 +159,32 @@ with tab_results:
             X_eval, y_eval = X, y
 
         from sklearn.model_selection import train_test_split
-        X_tr, X_te, y_tr, y_te = train_test_split(X_eval, y_eval, test_size=0.2, random_state=SEED, stratify=y_eval)
+
+        # (this part is already in your code)
+        X_tr, X_te, y_tr, y_te = None, None, None, None  # just to keep linters happy
+
+        # NEW: drop classes with <2 samples to avoid stratify error
+        vals, counts = np.unique(y_eval, return_counts=True)
+        valid_classes = {int(v) for v, c in zip(vals, counts) if c >= 2}
+        if len(valid_classes) < len(vals):
+            dropped_labels = [label_mapping.get(int(v), str(v)) for v, c in zip(vals, counts) if c < 2]
+            st.warning(
+                "Dropped classes with < 2 samples for evaluation: " + ", ".join(map(str, dropped_labels))
+            )
+            keep_mask = np.array([int(y) in valid_classes for y in y_eval])
+            X_eval = X_eval[keep_mask]
+            y_eval = y_eval[keep_mask]
+
+        # If after filtering we still have at least 2 classes, keep stratify; otherwise skip it.
+        if len(np.unique(y_eval)) >= 2:
+            X_tr, X_te, y_tr, y_te = train_test_split(
+                X_eval, y_eval, test_size=0.2, random_state=SEED, stratify=y_eval
+            )
+        else:
+            X_tr, X_te, y_tr, y_te = train_test_split(
+                X_eval, y_eval, test_size=0.2, random_state=SEED, stratify=None
+            )
+
 
         rows = []
         for name, mdl in models.items():
