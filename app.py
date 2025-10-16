@@ -1,9 +1,12 @@
-
 import os
 import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+from pathlib import Path
+
 
 st.set_page_config(page_title="IDS Mini-Project", layout="wide")
 
@@ -99,6 +102,10 @@ if "label" not in df.columns:
     st.error("Dataset must have a 'label' column.")
     st.stop()
 
+# --- DROP FileDownload rows for the app views/eval ---
+df["label"] = df["label"].astype(str).str.strip()
+df = df[df["label"] != "FileDownload"]  # removed singleton class
+
 arts = load_artifacts()
 feature_columns = arts.get("feature_columns")
 models = arts.get("models", {})
@@ -112,7 +119,12 @@ tab_overview, tab_results, tab_importance, tab_predict = st.tabs(
 # ---------- Overview ----------
 with tab_overview:
     st.title("Intrusion Detection — Project Overview")
-    st.markdown("Short summary of what we did and why it matters, aimed at non-technical readers.")
+    st.markdown("•   Today, we’re surrounded by smart devices from cameras to coffee machines and all are connected to the internet.")
+    st.markdown("•   But that also means there are more ways for hackers to attack.")
+    st.markdown("•   Our project explores how AI can automatically spot suspicious network activity before it becomes a problem.")
+    st.markdown("•   We cleaned real IoT traffic data and trained models to tell normal behavior from potential attacks.")
+    st.markdown("•   Then we compared how well different approaches performed and visualized the results.")
+    st.markdown("•   Finally, we built a simple demo where anyone can try it out and see how the system reacts in real time.")
 
     c1, c2 = st.columns([2,1])
     with c1:
@@ -125,23 +137,28 @@ with tab_overview:
         st.write(list(df.columns))
 
     st.subheader("Class balance")
-    counts = df["label"].astype(str).str.strip().value_counts().sort_values(ascending=False)
-    fig, ax = plt.subplots(figsize=(8,3))
-    counts.plot(kind="bar", ax=ax)
-    ax.set_ylabel("Count")
-    ax.set_title("Labels")
-    ax.tick_params(axis="x", rotation=45, labelsize=9)
-    for p in ax.patches:
-        ax.annotate(f"{int(p.get_height()):,}", (p.get_x()+p.get_width()/2, p.get_height()),
-                    ha="center", va="bottom", fontsize=8)
+
+    # same formatting as your Colab snippet
+    sns.set(style="whitegrid")
+    order = df["label"].astype(str).str.strip().value_counts().index
+
+    fig, ax = plt.subplots(figsize=(8,5))
+    sns.countplot(data=df, x="label", palette="Set2", order=order, ax=ax)
+
+    ax.set_title("Label Distribution", fontsize=14)
+    ax.set_xlabel("Attack Type", fontsize=12)
+    ax.set_ylabel("Number of Samples", fontsize=12)
+    plt.xticks(rotation=45)
+
     st.pyplot(fig, clear_figure=True)
+
 
 # Results
 with tab_results:
     st.header("Results")
     st.markdown(
         "- We trained multiple models (e.g., Logistic Regression, Decision Tree).  \n"
-        "- Below we show quick accuracy on a small holdout from this dataset (if model files are present)."
+        "- Below we show quick accuracy on a small holdout from this dataset."
     )
 
     if feature_columns and models:
@@ -160,22 +177,18 @@ with tab_results:
 
         from sklearn.model_selection import train_test_split
 
-        # (this part is already in your code)
-        X_tr, X_te, y_tr, y_te = None, None, None, None  # just to keep linters happy
+        X_tr, X_te, y_tr, y_te = None, None, None, None
 
-        # NEW: drop classes with <2 samples to avoid stratify error
-        vals, counts = np.unique(y_eval, return_counts=True)
-        valid_classes = {int(v) for v, c in zip(vals, counts) if c >= 2}
+        # keep only classes with at least 2 samples (safety)
+        vals, counts_arr = np.unique(y_eval, return_counts=True)
+        valid_classes = {int(v) for v, c in zip(vals, counts_arr) if c >= 2}
         if len(valid_classes) < len(vals):
-            dropped_labels = [label_mapping.get(int(v), str(v)) for v, c in zip(vals, counts) if c < 2]
-            st.warning(
-                "Dropped classes with < 2 samples for evaluation: " + ", ".join(map(str, dropped_labels))
-            )
+            dropped_labels = [label_mapping.get(int(v), str(v)) for v, c in zip(vals, counts_arr) if c < 2]
+            st.warning("Dropped classes with < 2 samples for evaluation: " + ", ".join(map(str, dropped_labels)))
             keep_mask = np.array([int(y) in valid_classes for y in y_eval])
             X_eval = X_eval[keep_mask]
             y_eval = y_eval[keep_mask]
 
-        # If after filtering we still have at least 2 classes, keep stratify; otherwise skip it.
         if len(np.unique(y_eval)) >= 2:
             X_tr, X_te, y_tr, y_te = train_test_split(
                 X_eval, y_eval, test_size=0.2, random_state=SEED, stratify=y_eval
@@ -184,7 +197,6 @@ with tab_results:
             X_tr, X_te, y_tr, y_te = train_test_split(
                 X_eval, y_eval, test_size=0.2, random_state=SEED, stratify=None
             )
-
 
         rows = []
         for name, mdl in models.items():
@@ -196,14 +208,73 @@ with tab_results:
                 st.warning(f"{name} failed to score: {e}")
         if rows:
             st.dataframe(pd.DataFrame(rows).sort_values("Accuracy", ascending=False), use_container_width=True)
-    else:
-        st.info("Put your trained models + feature_columns.pkl in the models/ folder to show results here.")
+            
 
-    # show saved figure if available
-    tree_png = os.path.join(FIGURES_DIR, "decision_tree_visualization.png")
-    if os.path.exists(tree_png):
-        st.subheader("Decision tree snapshot")
-        st.image(tree_png, caption="Decision Tree (depth=3)")
+
+
+
+    st.subheader("Confusion Matrices")
+
+    model_to_show = st.selectbox(
+        "Select a model to visualize confusion matrix",
+        list(models.keys())
+    )
+
+    mdl = models[model_to_show]
+    try:
+        # classes present in the current test set only
+        present_classes = np.array(sorted(np.unique(y_te), key=int))
+        display_labels = [label_mapping.get(int(c), str(c)) for c in present_classes]
+
+        y_pred = mdl.predict(X_te)
+        cm = confusion_matrix(y_te, y_pred, labels=present_classes)
+
+        col_plot, _ = st.columns([0.55, 0.45])
+        with col_plot:
+            fig, ax = plt.subplots(figsize=(4.2, 3.6))
+            disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=display_labels)
+            disp.plot(ax=ax, cmap="Blues", colorbar=False)
+            ax.set_title(f"{model_to_show} — Confusion Matrix", fontsize=11)
+            ax.tick_params(axis="both", labelsize=9)
+
+            # shrink text font size (handles both 1D and 2D text_ arrays)
+            texts = disp.text_.ravel() if isinstance(disp.text_, np.ndarray) else disp.text_
+            for t in texts:
+                t.set_fontsize(8)
+
+            plt.tight_layout()
+            st.pyplot(fig, clear_figure=True)
+
+    except Exception as e:
+        st.warning(f"Could not compute confusion matrix for {model_to_show}: {e}")
+
+
+
+
+
+
+    st.subheader("Visualisations")
+
+    import glob
+
+    # Find both .png and .jpg images
+    image_paths = sorted(
+        glob.glob(os.path.join(FIGURES_DIR, "*.png")) +
+        glob.glob(os.path.join(FIGURES_DIR, "*.jpg"))
+    )
+
+    if not image_paths:
+        st.info(f"No images found in '{FIGURES_DIR}/'.")
+    else:
+        cols_per_row = 3  # Number of images per row
+        for i in range(0, len(image_paths), cols_per_row):
+            cols = st.columns(cols_per_row)
+            for col, path in zip(cols, image_paths[i:i+cols_per_row]):
+                col.image(path, use_container_width=True)
+
+
+
+
 
 # Feature insights
 with tab_importance:
@@ -228,9 +299,8 @@ with tab_importance:
 #Prediction demo
 with tab_predict:
     st.header("Try a single prediction")
-    st.caption("Enter a synthetic flow (keep it simple). The app will one-hot encode proto/state and align to the model’s feature list.")
+    st.caption("Enter a sample network flow.")
 
-    # NEW: choose which model
     if models:
         model_choice = st.selectbox(
             "Choose model for prediction",
@@ -276,7 +346,6 @@ with tab_predict:
                     top_p = float(proba[yhat[0]])
                     conf_txt = f" (confidence {top_p:.2%})"
 
-                #now with color coding
                 pred_label = str(pred[0]).lower()
                 if "benign" in pred_label:
                     st.success(f"✅ Benign traffic detected{conf_txt}")
